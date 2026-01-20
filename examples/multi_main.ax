@@ -1,0 +1,12 @@
+fn main_logic() -> Unit {
+    let greeting = greet("Axis");
+    let excited = make_excited(greeting);
+    axis_io_print(excited);
+    axis_io_print("\n");
+    ()
+}
+
+fn axis_entry(args: Unit) -> Unit {
+    let _ = main_logic();
+    ()
+}

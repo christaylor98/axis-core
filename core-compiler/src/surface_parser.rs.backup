@@ -1,0 +1,385 @@
+// Minimal surface parser for Batch A
+// Parses: let, blocks, calls, literals, identifiers
+// Does NOT parse: if, match, operators, lambdas, etc.
+
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub found: String,
+    pub expected: String,
+    pub source_line: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Parse error in {}:{}:{}", self.file, self.line, self.column)?;
+        writeln!(f, "    {}", self.source_line)?;
+        writeln!(f, "    {}^", " ".repeat(self.column.saturating_sub(1)))?;
+        write!(f, "Expected '{}', got '{}'", self.expected, self.found)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SourceLocation {
+    line: usize,
+    column: usize,
+    byte_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct Token {
+    text: String,
+    location: SourceLocation,
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+    source: String,
+    file: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum SurfaceExpr {
+    IntLit(i64),
+    Ident(String),
+    Call(String, Vec<SurfaceExpr>),
+    Block(Vec<SurfaceStmt>),
+}
+
+#[derive(Debug, Clone)]
+pub enum SurfaceStmt {
+    Let(String, SurfaceExpr),
+    Expr(SurfaceExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct FnDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: SurfaceExpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct Module {
+    pub uses: Vec<Vec<String>>,
+    pub functions: Vec<FnDef>,
+}
+
+pub fn parse_module_with_file(source: &str, file: &str) -> Result<Module, ParseError> {
+    let tokens = tokenize_with_location(source);
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        source: source.to_string(),
+        file: file.to_string(),
+    };
+    parser.parse_module()
+}
+
+pub fn parse_module(source: &str) -> Result<Module, String> {
+    match parse_module_with_file(source, "<unknown>") {
+        Ok(module) => Ok(module),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+impl Parser {
+    fn parse_module(&mut self) -> Result<Module, ParseError> {
+        let mut uses = Vec::new();
+        let mut functions = Vec::new();
+
+        while self.pos < self.tokens.len() {
+            // Skip comments that became tokens
+            while self.pos < self.tokens.len() && self.tokens[self.pos].text.starts_with("//") {
+                self.pos += 1;
+            }
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            
+            if self.tokens[self.pos].text == "use" {
+                self.pos += 1;
+                let path = self.parse_path()?;
+                if self.pos < self.tokens.len() && self.tokens[self.pos].text == ";" {
+                    self.pos += 1;
+                }
+                uses.push(path);
+            } else if self.tokens[self.pos].text == "fn" {
+                functions.push(self.parse_function()?);
+            } else {
+                return self.error(&format!("function or use declaration"), &self.tokens[self.pos].text);
+            }
+        }
+
+        Ok(Module { uses, functions })
+    }
+
+    fn parse_function(&mut self) -> Result<FnDef, ParseError> {
+        self.expect_token("fn")?;
+        let name = self.consume_token()?.text.clone();
+        self.expect_token("(")?;
+        
+        let mut params = Vec::new();
+        while self.pos < self.tokens.len() && self.tokens[self.pos].text != ")" {
+            params.push(self.consume_token()?.text.clone());
+            if self.pos < self.tokens.len() && self.tokens[self.pos].text == ":" {
+                self.pos += 1; // skip type annotation
+                if self.pos < self.tokens.len() {
+                    self.pos += 1; // skip type name
+                }
+            }
+            if self.pos < self.tokens.len() && self.tokens[self.pos].text == "," {
+                self.pos += 1;
+            }
+        }
+        self.expect_token(")")?;
+        
+        // Skip optional return type
+        if self.pos < self.tokens.len() && self.tokens[self.pos].text == "->" {
+            self.pos += 1;
+            if self.pos < self.tokens.len() {
+                self.pos += 1; // skip return type
+            }
+        }
+        
+        let body = self.parse_block()?;
+        Ok(FnDef { name, params, body })
+    }
+
+    fn parse_block(&mut self) -> Result<SurfaceExpr, ParseError> {
+        self.expect_token("{")?;
+        let mut stmts = Vec::new();
+        
+        while self.pos < self.tokens.len() && self.tokens[self.pos].text != "}" {
+            if self.tokens[self.pos].text == "let" {
+                self.pos += 1;
+                let name = self.consume_token()?.text.clone();
+                self.expect_token("=")?;
+                let expr = self.parse_expr()?;
+                self.expect_token(";")?;
+                stmts.push(SurfaceStmt::Let(name, expr));
+            } else {
+                let expr = self.parse_expr()?;
+                if self.pos < self.tokens.len() && self.tokens[self.pos].text == ";" {
+                    self.pos += 1;
+                    stmts.push(SurfaceStmt::Expr(expr));
+                } else {
+                    // Final expression
+                    stmts.push(SurfaceStmt::Expr(expr));
+                    break;
+                }
+            }
+        }
+        
+        self.expect_token("}")?;
+        Ok(SurfaceExpr::Block(stmts))
+    }
+
+    fn parse_expr(&mut self) -> Result<SurfaceExpr, ParseError> {
+        if self.pos >= self.tokens.len() {
+            return self.error("expression", "EOF");
+        }
+        
+        if self.tokens[self.pos].text == "{" {
+            return self.parse_block();
+        }
+        
+        if self.tokens[self.pos].text.parse::<i64>().is_ok() {
+            let n = self.consume_token()?.text.parse().unwrap();
+            return Ok(SurfaceExpr::IntLit(n));
+        }
+        
+        let name = self.consume_token()?.text.clone();
+        if self.pos < self.tokens.len() && self.tokens[self.pos].text == "(" {
+            self.pos += 1;
+            let mut args = Vec::new();
+            while self.pos < self.tokens.len() && self.tokens[self.pos].text != ")" {
+                args.push(self.parse_expr()?);
+                if self.pos < self.tokens.len() && self.tokens[self.pos].text == "," {
+                    self.pos += 1;
+                }
+            }
+            self.expect_token(")")?;
+            Ok(SurfaceExpr::Call(name, args))
+        } else {
+            Ok(SurfaceExpr::Ident(name))
+        }
+    }
+
+    fn parse_path(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut path = vec![self.consume_token()?.text.clone()];
+        while self.pos < self.tokens.len() && self.tokens[self.pos].text == "." {
+            self.pos += 1;
+            path.push(self.consume_token()?.text.clone());
+        }
+        Ok(path)
+    }
+
+    fn expect_token(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.pos >= self.tokens.len() {
+            return self.error(expected, "EOF");
+        }
+        let token = &self.tokens[self.pos];
+        if token.text == expected {
+            self.pos += 1;
+            Ok(())
+        } else {
+            self.error(expected, &token.text)
+        }
+    }
+    
+    fn consume_token(&mut self) -> Result<&Token, ParseError> {
+        if self.pos >= self.tokens.len() {
+            return self.error("token", "EOF");
+        }
+        let token = &self.tokens[self.pos];
+        self.pos += 1;
+        Ok(token)
+    }
+    
+    fn error<T>(&self, expected: &str, found: &str) -> Result<T, ParseError> {
+        let (line, column, source_line) = if self.pos < self.tokens.len() {
+            let token = &self.tokens[self.pos];
+            (token.location.line, token.location.column, self.get_source_line(token.location.line))
+        } else if let Some(last_token) = self.tokens.last() {
+            (last_token.location.line, last_token.location.column + last_token.text.len(), self.get_source_line(last_token.location.line))
+        } else {
+            (1, 1, "<empty file>".to_string())
+        };
+        
+        Err(ParseError {
+            file: self.file.clone(),
+            line,
+            column,
+            found: found.to_string(),
+            expected: expected.to_string(),
+            source_line,
+        })
+    }
+    
+    fn get_source_line(&self, line_num: usize) -> String {
+        self.source.lines().nth(line_num - 1).unwrap_or("<line not found>").to_string()
+    }
+}
+
+fn tokenize_with_location(source: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut chars = source.chars().peekable();
+    let mut line = 1;
+    let mut column = 1;
+    let mut byte_offset = 0;
+    
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            if ch == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+            chars.next();
+            byte_offset += 1;
+        } else if ch == '/' && chars.clone().nth(1) == Some('/') {
+            // Skip line comment
+            while let Some(c) = chars.next() {
+                byte_offset += 1;
+                if c == '\n' {
+                    line += 1;
+                    column = 1;
+                    break;
+                }
+                column += 1;
+            }
+        } else if ch.is_alphabetic() || ch == '_' {
+            let start_column = column;
+            let start_offset = byte_offset;
+            let mut ident = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_alphanumeric() || c == '_' {
+                    ident.push(chars.next().unwrap());
+                    column += 1;
+                    byte_offset += 1;
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token {
+                text: ident,
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else if ch.is_numeric() {
+            let start_column = column;
+            let start_offset = byte_offset;
+            let mut num = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_numeric() {
+                    num.push(chars.next().unwrap());
+                    column += 1;
+                    byte_offset += 1;
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token {
+                text: num,
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else if ch == '-' && chars.clone().nth(1) == Some('>') {
+            let start_column = column;
+            let start_offset = byte_offset;
+            chars.next();
+            chars.next();
+            column += 2;
+            byte_offset += 2;
+            tokens.push(Token {
+                text: "->".to_string(),
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else if ch == '=' && chars.clone().nth(1) == Some('>') {
+            let start_column = column;
+            let start_offset = byte_offset;
+            chars.next();
+            chars.next();
+            column += 2;
+            byte_offset += 2;
+            tokens.push(Token {
+                text: "=".to_string(), // Treat => as =
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else if "(){},.;:".contains(ch) {
+            let start_column = column;
+            let start_offset = byte_offset;
+            let tok = chars.next().unwrap().to_string();
+            column += 1;
+            byte_offset += 1;
+            tokens.push(Token {
+                text: tok,
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else if ch == '=' {
+            let start_column = column;
+            let start_offset = byte_offset;
+            let tok = chars.next().unwrap().to_string();
+            column += 1;
+            byte_offset += 1;
+            tokens.push(Token {
+                text: tok,
+                location: SourceLocation { line, column: start_column, byte_offset: start_offset },
+            });
+        } else {
+            chars.next(); // skip unknown char
+            column += 1;
+            byte_offset += 1;
+        }
+    }
+    
+    tokens
+}
+
+// Keep old tokenize for backward compatibility
+fn tokenize(source: &str) -> Vec<String> {
+    tokenize_with_location(source).into_iter().map(|t| t.text).collect()
+}

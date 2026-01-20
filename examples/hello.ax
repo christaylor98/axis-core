@@ -1,0 +1,9 @@
+fn hello() -> Unit {
+    axis_io_print("Hello, World!\n");
+    ()
+}
+
+fn axis_entry(args: Unit) -> Unit {
+    let _ = hello();
+    ()
+}

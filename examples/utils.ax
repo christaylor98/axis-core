@@ -1,0 +1,7 @@
+fn greet(name: Str) -> Str {
+    str_concat("Hello, ", name)
+}
+
+fn make_excited(msg: Str) -> Str {
+    str_concat(msg, "!")
+}
