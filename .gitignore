@@ -9,6 +9,10 @@ target/
 /target/
 **/*.rs.bk
 *.pdb
+# Cargo environment files
+.cargo/env
+# Cargo lock files
+**/Cargo.lock
 
 ################################################################################
 # IDEs / Editors

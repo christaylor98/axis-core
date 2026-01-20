@@ -30,7 +30,7 @@ Surface Language(s)
         ▼
      Bridge(s)
    (Rust, etc.)
-````
+```
 
 * **IR Compiler**
   Lowers surface syntax into the canonical Axis Core IR.
@@ -72,11 +72,17 @@ After building the compiler (for example via Cargo),
 the executable will be available in the build output directory:
 
 ```bash
-./core-compiler/target/debug/axis-compiler \
+./core-compiler/target/release/axis-compiler \
   --sources <file.ax> \
   --registries <registry.axreg>
 ```
 
+For example, to compile the `examples/hello.ax` source file
+```bash
+./core-compiler/target/release/axis-compiler \
+  --sources examples/hello.ax \
+  --registries registries/axis.axreg 
+```
 By default, Core IR is emitted into `./coreir/`.
 
 Use `--out` to override the output location.
